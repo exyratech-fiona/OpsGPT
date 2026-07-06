@@ -1,0 +1,125 @@
+# OpsGPT — client run package (Apple Silicon Mac).
+# Pulls pre-built arm64 images from Docker Hub — NO building, no source needed.
+#
+# Quick start (see README.md):
+#   1) put your Qwen3-8B GGUF in ./models
+#   2) edit .env  (set DOCKERHUB_USER + MODEL_FILE), or run ./setup.sh for secrets
+#   3) docker compose up -d
+#   4) open http://localhost:8000/api/docs
+
+name: opsgpt
+
+services:
+  llamacpp:
+    image: ${DOCKERHUB_USER:?set DOCKERHUB_USER in .env}/opsgpt-llamacpp:${IMAGE_TAG:-mac}
+    platform: linux/arm64
+    container_name: opsgpt-llamacpp
+    restart: unless-stopped
+    volumes:
+      - ./models:/models:ro
+    command:
+      - "--model"
+      - "/models/${MODEL_FILE:-Qwen3-8B-Q4_K_M.gguf}"
+      - "--alias"
+      - "qwen3-8b"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8080"
+      - "--ctx-size"
+      - "${LLAMA_CTX:-8192}"
+      - "--threads"
+      - "${LLAMA_THREADS:-8}"
+      - "--parallel"
+      - "1"
+      - "--cont-batching"
+      - "--jinja"
+    networks: [opsnet]
+
+  embed:
+    image: ${DOCKERHUB_USER:?set DOCKERHUB_USER in .env}/opsgpt-llamacpp:${IMAGE_TAG:-mac}
+    platform: linux/arm64
+    container_name: opsgpt-embed
+    restart: unless-stopped
+    volumes:
+      - ./models:/models:ro
+    command:
+      - "--model"
+      - "/models/${EMBED_MODEL_FILE:-nomic-embed-text-v1.5.f16.gguf}"
+      - "--embeddings"
+      - "--pooling"
+      - "mean"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8080"
+      - "--ctx-size"
+      - "2048"
+      - "--batch-size"
+      - "2048"
+      - "--ubatch-size"
+      - "2048"
+      - "--threads"
+      - "4"
+    networks: [opsnet]
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: opsgpt-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: "${POSTGRES_USER:-opsgpt}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-opsgpt}"
+      POSTGRES_DB: "${POSTGRES_DB:-opsgpt}"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-opsgpt}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks: [opsnet]
+
+  redis:
+    image: redis:7-alpine
+    container_name: opsgpt-redis
+    restart: unless-stopped
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    networks: [opsnet]
+
+  backend:
+    image: ${DOCKERHUB_USER:?set DOCKERHUB_USER in .env}/opsgpt-backend:${IMAGE_TAG:-mac}
+    platform: linux/arm64
+    container_name: opsgpt-backend
+    restart: unless-stopped
+    ports:
+      - "${API_PORT:-8000}:8000"
+    environment:
+      OPSGPT_ENVIRONMENT: "development"
+      OPSGPT_LLAMACPP_BASE_URL: "http://llamacpp:8080"
+      OPSGPT_MODEL_PHI_BASE_URL: "http://llamacpp:8080"
+      OPSGPT_MODEL_XCODER_BASE_URL: "http://llamacpp:8080"
+      OPSGPT_EMBED_BASE_URL: "http://embed:8080"
+      OPSGPT_DATABASE_URL: "postgresql+asyncpg://${POSTGRES_USER:-opsgpt}:${POSTGRES_PASSWORD:-opsgpt}@postgres:5432/${POSTGRES_DB:-opsgpt}"
+      OPSGPT_REDIS_URL: "redis://redis:6379/0"
+      OPSGPT_JWT_SECRET: "${OPSGPT_JWT_SECRET:?run ./setup.sh first to generate .env}"
+      OPSGPT_ADMIN_EMAIL: "${OPSGPT_ADMIN_EMAIL:-admin@opsgpt.local}"
+      OPSGPT_ADMIN_PASSWORD: "${OPSGPT_ADMIN_PASSWORD:?run ./setup.sh first to generate .env}"
+      OPSGPT_COOKIE_SECURE: "false"
+      OPSGPT_ALERTS_ENABLED: "false"
+      OPSGPT_CORS_ORIGINS: "http://localhost:${API_PORT:-8000}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      llamacpp:
+        condition: service_started
+      redis:
+        condition: service_started
+    networks: [opsnet]
+
+networks:
+  opsnet:
+    driver: bridge
+
+volumes:
+  pgdata:

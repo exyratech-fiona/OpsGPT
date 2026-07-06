@@ -1,0 +1,130 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Dashboard AI-analysis: readable text per theme. */
+.dash-light .dash-analysis, .dash-light .dash-analysis * { color: #1f2937 !important; }
+.dash-light .dash-analysis h1, .dash-light .dash-analysis h2, .dash-light .dash-analysis h3, .dash-light .dash-analysis strong { color: #0f172a !important; }
+.dash-dark .dash-analysis, .dash-dark .dash-analysis * { color: #e8eaf5 !important; }
+.dash-dark .dash-analysis h1, .dash-dark .dash-analysis h2, .dash-dark .dash-analysis h3, .dash-dark .dash-analysis strong { color: #ffffff !important; }
+/* inline code inside analysis: keep a subtle chip that reads in both themes */
+.dash-dark .dash-analysis code { background: #2a2e44 !important; color: #c7d2fe !important; }
+.dash-light .dash-analysis code { background: #eef0fa !important; color: #3a2c7a !important; }
+
+/* Print: show only the report document, on white. */
+@media print {
+  body * { visibility: hidden !important; }
+  .print-area, .print-area * { visibility: visible !important; }
+  .print-area {
+    position: absolute !important;
+    left: 0; top: 0; width: 100%;
+    background: #fff !important;
+  }
+  .print-area .paper { box-shadow: none !important; margin: 0 !important; }
+  .no-print { display: none !important; }
+  .page-break { page-break-before: always; }
+  @page { margin: 14mm; }
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-ops-bg text-ops-text font-sans antialiased;
+    position: relative;
+  }
+
+  /* Ambient Gemini-style colour glow behind everything */
+  body::before {
+    content: "";
+    position: fixed;
+    inset: -25%;
+    z-index: -1;
+    pointer-events: none;
+    background:
+      radial-gradient(38% 38% at 15% 8%, rgba(79, 140, 255, 0.20), transparent 70%),
+      radial-gradient(42% 42% at 85% 22%, rgba(139, 92, 246, 0.18), transparent 70%),
+      radial-gradient(48% 48% at 50% 98%, rgba(236, 72, 153, 0.14), transparent 70%);
+    filter: blur(48px);
+    animation: float 16s ease-in-out infinite;
+  }
+
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: #2b3048 transparent;
+  }
+  *::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  *::-webkit-scrollbar-thumb {
+    background-color: #2b3048;
+    border-radius: 9999px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+  *::-webkit-scrollbar-thumb:hover {
+    background-color: #3a4060;
+    background-clip: content-box;
+  }
+}
+
+@layer components {
+  /* frosted glass surface */
+  .glass {
+    background: rgba(16, 16, 27, 0.62);
+    backdrop-filter: blur(14px) saturate(120%);
+    -webkit-backdrop-filter: blur(14px) saturate(120%);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+  }
+
+  /* Gemini gradient text */
+  .text-gradient {
+    background: linear-gradient(120deg, #7aa8ff, #a78bfa, #f472b6);
+    background-size: 200% 200%;
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    animation: gradient-x 6s ease infinite;
+  }
+
+  /* a soft gradient ring/border */
+  .gradient-border {
+    position: relative;
+  }
+  .gradient-border::before {
+    content: "";
+    position: absolute;
+    inset: -1px;
+    border-radius: inherit;
+    padding: 1px;
+    background: linear-gradient(120deg, rgba(79, 140, 255, 0.6), rgba(139, 92, 246, 0.6), rgba(236, 72, 153, 0.5));
+    -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+    pointer-events: none;
+  }
+
+  /* Markdown typography */
+  .prose-ops {
+    @apply leading-7 text-ops-text;
+  }
+  .prose-ops p { @apply my-3; }
+  .prose-ops ul { @apply my-3 list-disc pl-6; }
+  .prose-ops ol { @apply my-3 list-decimal pl-6; }
+  .prose-ops li { @apply my-1; }
+  .prose-ops h1, .prose-ops h2, .prose-ops h3 { @apply mb-2 mt-5 font-semibold; }
+  .prose-ops h1 { @apply text-xl; }
+  .prose-ops h2 { @apply text-lg; }
+  .prose-ops a { @apply text-ops-accent underline underline-offset-2; }
+  .prose-ops blockquote { @apply my-3 border-l-2 border-ops-border pl-4 text-ops-muted; }
+  .prose-ops table { @apply my-3 w-full border-collapse text-sm; }
+  .prose-ops th, .prose-ops td { @apply border border-ops-border px-3 py-1.5 text-left; }
+  .prose-ops :not(pre) > code {
+    @apply rounded bg-ops-panel px-1.5 py-0.5 font-mono text-[0.85em] text-ops-text;
+  }
+}

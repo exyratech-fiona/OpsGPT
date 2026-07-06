@@ -1,0 +1,74 @@
+# ============================================================
+#  OpsGPT — .gitignore
+#  Never commit: secrets, models, runtime data, scratch files.
+# ============================================================
+
+# ---- secrets & env ----
+.env
+.env.*
+!.env.example
+secrets/
+certs/
+*.kubeconfig
+*-readonly.yaml
+*.pem
+*.key
+
+# ---- models & large data (13GB+ — distributed separately) ----
+models/*.gguf
+models/*.bin
+
+# ---- runtime data (bind mounts / volumes) ----
+uploads/
+embeddings/
+chromadb/
+postgres/data/
+prometheus_data/
+grafana_data/
+backups/
+logs/
+
+# ---- python ----
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.pytest_cache/
+
+# ---- node / frontend ----
+node_modules/
+dist/
+.vite/
+*.log
+
+# ---- os / editor ----
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# ---- scratch: one-off probes / verification / key helpers (NOT part of the product) ----
+/*_probe*.py
+/*_verify*.py
+/gl_*.py
+/gitlab_*.py
+/dozzle_*.py
+/mint_key.py
+/revoke_key.py
+/probe_*.py
+/*.bak
+/*.bak.*
+/v1_verify.sh
+/delivery_verify.py
+/export_verify.py
+/overview_verify.py
+/report_verify.py
+
+# root-level scratch scripts (product is under backend/ frontend/ scripts/)
+/*.py
+/*.sh
+/verify_*.py
+/scripts/*_build.sh
+/scripts/bench_*.sh
+/scripts/speed_bench*.sh

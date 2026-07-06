@@ -1,0 +1,141 @@
+# OpsGPT — Mac (Apple Silicon / arm64) API package.
+# Ships llama.cpp (Qwen3-8B) + embeddings + the FastAPI backend (Swagger + an
+# OpenAI-compatible /v1 API). All images build NATIVELY on the Mac's arm64 CPU
+# (the llama.cpp Dockerfile auto-detects arm64 and builds with NEON).
+#
+# NOTE: Docker on macOS is CPU-only (no Metal GPU inside containers), so the 8B
+# model runs at moderate speed on the M4's cores — good for API/testing.
+#
+# Quick start (see README.md):
+#   1) put your GGUF files in ./models
+#   2) ./setup.sh          (creates .env with random secrets)
+#   3) docker compose up --build
+#   4) open http://localhost:8000/api/docs   (Swagger)
+
+name: opsgpt
+
+services:
+  # ---- Chat model: Qwen3-8B ----
+  llamacpp:
+    build:
+      context: ../../docker/llamacpp
+    image: opsgpt/llamacpp:mac
+    container_name: opsgpt-llamacpp
+    restart: unless-stopped
+    volumes:
+      - ./models:/models:ro
+    command:
+      - "--model"
+      - "/models/${MODEL_FILE:-Qwen3-8B-Q4_K_M.gguf}"
+      - "--alias"
+      - "qwen3-8b"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8080"
+      - "--ctx-size"
+      - "${LLAMA_CTX:-8192}"
+      - "--threads"
+      - "${LLAMA_THREADS:-8}"
+      - "--parallel"
+      - "1"
+      - "--cont-batching"
+      - "--jinja"          # enables OpenAI-style tool/function calling
+    networks: [opsnet]
+
+  # ---- Embeddings model: nomic-embed (for /v1/embeddings) ----
+  # Needs nomic-embed-text-v1.5.f16.gguf in ./models (see README). If you only
+  # need chat, you can ignore this service — chat works without it.
+  embed:
+    build:
+      context: ../../docker/llamacpp
+    image: opsgpt/llamacpp:mac
+    container_name: opsgpt-embed
+    restart: unless-stopped
+    volumes:
+      - ./models:/models:ro
+    command:
+      - "--model"
+      - "/models/${EMBED_MODEL_FILE:-nomic-embed-text-v1.5.f16.gguf}"
+      - "--embeddings"
+      - "--pooling"
+      - "mean"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8080"
+      - "--ctx-size"
+      - "2048"
+      - "--batch-size"
+      - "2048"
+      - "--ubatch-size"
+      - "2048"
+      - "--threads"
+      - "4"
+    networks: [opsnet]
+
+  # ---- Postgres (users, API keys) ----
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: opsgpt-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: "${POSTGRES_USER:-opsgpt}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-opsgpt}"
+      POSTGRES_DB: "${POSTGRES_DB:-opsgpt}"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-opsgpt}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks: [opsnet]
+
+  # ---- Redis (rate limiting / cache; ephemeral) ----
+  redis:
+    image: redis:7-alpine
+    container_name: opsgpt-redis
+    restart: unless-stopped
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    networks: [opsnet]
+
+  # ---- FastAPI backend: Swagger at /api/docs, OpenAI-compatible API at /v1 ----
+  backend:
+    build:
+      context: ../../backend
+    image: opsgpt/backend:mac
+    container_name: opsgpt-backend
+    restart: unless-stopped
+    ports:
+      - "${API_PORT:-8000}:8000"
+    environment:
+      OPSGPT_ENVIRONMENT: "development"          # local laptop demo
+      OPSGPT_LLAMACPP_BASE_URL: "http://llamacpp:8080"
+      # only one model is shipped, so route every mode to Qwen3-8B:
+      OPSGPT_MODEL_PHI_BASE_URL: "http://llamacpp:8080"
+      OPSGPT_MODEL_XCODER_BASE_URL: "http://llamacpp:8080"
+      OPSGPT_EMBED_BASE_URL: "http://embed:8080"
+      OPSGPT_DATABASE_URL: "postgresql+asyncpg://${POSTGRES_USER:-opsgpt}:${POSTGRES_PASSWORD:-opsgpt}@postgres:5432/${POSTGRES_DB:-opsgpt}"
+      OPSGPT_REDIS_URL: "redis://redis:6379/0"
+      OPSGPT_JWT_SECRET: "${OPSGPT_JWT_SECRET:?run ./setup.sh first to generate .env}"
+      OPSGPT_ADMIN_EMAIL: "${OPSGPT_ADMIN_EMAIL:-admin@opsgpt.local}"
+      OPSGPT_ADMIN_PASSWORD: "${OPSGPT_ADMIN_PASSWORD:?run ./setup.sh first to generate .env}"
+      OPSGPT_COOKIE_SECURE: "false"              # allow login over http://localhost
+      OPSGPT_ALERTS_ENABLED: "false"             # no GitLab/K8s in this package
+      OPSGPT_CORS_ORIGINS: "http://localhost:${API_PORT:-8000}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      llamacpp:
+        condition: service_started
+      redis:
+        condition: service_started
+    networks: [opsnet]
+
+networks:
+  opsnet:
+    driver: bridge
+
+volumes:
+  pgdata:

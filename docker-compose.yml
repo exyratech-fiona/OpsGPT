@@ -1,0 +1,400 @@
+# OpsGPT — full stack: inference + API + UI + auth/RAG/MCP + monitoring.
+# All tunables come from .env (see .env.example). Models are bind-mounted
+# read-only from ./models so the image never bakes in multi-GB weights.
+
+# Phase 7: cap container log files so they can't fill the disk.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  llamacpp:
+    image: opsgpt/llamacpp:latest
+    container_name: opsgpt-llamacpp
+    restart: unless-stopped
+    logging: *default-logging
+    # Interleave the model across BOTH NUMA nodes so both memory controllers
+    # feed the CPU in parallel (~+50% decode tok/s on this box). numactl needs
+    # SYS_NICE to set the memory policy. Requires kernel numa_balancing=0
+    # (persisted in /etc/sysctl.d/99-opsgpt-numa.conf).
+    cap_add:
+      - SYS_NICE
+    entrypoint: ["numactl", "--interleave=all", "llama-server"]
+    volumes:
+      - ./models:/models:ro
+    command:
+      - "--model"
+      - "/models/${MODEL_FILE:-Qwen_Qwen3-8B-Q4_K_M.gguf}"
+      - "--alias"
+      - "${MODEL_ALIAS:-opsgpt}"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8080"
+      - "--ctx-size"
+      - "${LLAMA_CTX:-8192}"
+      - "--threads"
+      - "${LLAMA_THREADS:-10}"
+      - "--parallel"
+      - "${LLAMA_PARALLEL:-2}"
+      - "--cont-batching"
+      - "--numa"
+      - "${LLAMA_NUMA:-isolate}"
+      - "--metrics"
+      # enable Jinja chat-template rendering -> OpenAI-style tool/function calling
+      - "--jinja"
+    # Pin to a single NUMA node (one socket, physical cores 0-9) so all model
+    # memory is node-local. This box is memory-bandwidth-bound; spanning both
+    # sockets + kernel numa_balancing thrashed pages (~2-4 tok/s). One socket
+    # with local memory is the correct config for a model that fits in a node.
+    cpuset: "${LLAMA_CPUSET:-0-9}"
+    networks: [opsnet]
+
+  # --- Phase 5: specialist model servers (Auto routes each task here) ---
+  phi:
+    image: opsgpt/llamacpp:latest
+    container_name: opsgpt-phi
+    restart: unless-stopped
+    logging: *default-logging
+    cap_add: [SYS_NICE]
+    entrypoint: ["numactl", "--interleave=all", "llama-server"]
+    volumes:
+      - ./models:/models:ro
+    command:
+      - "--model"
+      - "/models/${PHI_MODEL_FILE:-Phi-4-mini-instruct-Q4_K_M.gguf}"
+      - "--alias"
+      - "phi-4-mini"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8080"
+      - "--ctx-size"
+      - "${SPECIALIST_CTX:-8192}"
+      - "--threads"
+      - "${LLAMA_THREADS:-20}"
+      - "--parallel"
+      - "1"
+      - "--cont-batching"
+      - "--numa"
+      - "distribute"
+      - "--jinja"
+      - "--metrics"
+    cpuset: "${LLAMA_CPUSET:-0-19}"
+    networks: [opsnet]
+
+  xcoder:
+    image: opsgpt/llamacpp:latest
+    container_name: opsgpt-xcoder
+    restart: unless-stopped
+    logging: *default-logging
+    cap_add: [SYS_NICE]
+    entrypoint: ["numactl", "--interleave=all", "llama-server"]
+    volumes:
+      - ./models:/models:ro
+    command:
+      - "--model"
+      - "/models/${XCODER_MODEL_FILE:-X-Coder-RL-Qwen3-8B.i1-Q4_K_M.gguf}"
+      - "--alias"
+      - "x-coder"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8080"
+      - "--ctx-size"
+      - "${SPECIALIST_CTX:-8192}"
+      - "--threads"
+      - "${LLAMA_THREADS:-20}"
+      - "--parallel"
+      - "1"
+      - "--cont-batching"
+      - "--numa"
+      - "distribute"
+      - "--jinja"
+      - "--metrics"
+    cpuset: "${LLAMA_CPUSET:-0-19}"
+    networks: [opsnet]
+
+  embed:
+    image: opsgpt/llamacpp:latest
+    container_name: opsgpt-embed
+    restart: unless-stopped
+    logging: *default-logging
+    volumes:
+      - ./models:/models:ro
+    entrypoint: ["llama-server"]
+    command:
+      - "--model"
+      - "/models/${EMBED_MODEL_FILE:-nomic-embed-text-v1.5.f16.gguf}"
+      - "--embeddings"
+      - "--pooling"
+      - "mean"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8080"
+      - "--ctx-size"
+      - "2048"
+      # logical + PHYSICAL batch must be >= the largest chunk's token count,
+      # otherwise embeddings fail ("input too large to process"). 2048 = ctx.
+      - "--batch-size"
+      - "2048"
+      - "--ubatch-size"
+      - "2048"
+      - "--threads"
+      - "${EMBED_THREADS:-4}"
+      - "--metrics"
+    networks: [opsnet]
+
+  # Second embedding model: BGE-large-en-v1.5 (1024-dim). BGE uses CLS pooling.
+  embed-bge:
+    image: opsgpt/llamacpp:latest
+    container_name: opsgpt-embed-bge
+    restart: unless-stopped
+    logging: *default-logging
+    volumes:
+      - ./models:/models:ro
+    entrypoint: ["llama-server"]
+    command:
+      - "--model"
+      - "/models/${EMBED_BGE_MODEL_FILE:-bge-large-en-v1.5-f16.gguf}"
+      - "--embeddings"
+      - "--pooling"
+      - "cls"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8080"
+      - "--ctx-size"
+      - "1024"
+      - "--batch-size"
+      - "1024"
+      - "--ubatch-size"
+      - "1024"
+      - "--threads"
+      - "${EMBED_BGE_THREADS:-4}"
+      - "--metrics"
+    networks: [opsnet]
+
+  # Cross-encoder reranker: bge-reranker-v2-m3 scores (query, chunk) pairs so RAG
+  # can retrieve top-20 by embedding then keep the best 5. --pooling rank.
+  reranker:
+    image: opsgpt/llamacpp:latest
+    container_name: opsgpt-reranker
+    restart: unless-stopped
+    logging: *default-logging
+    volumes:
+      - ./models:/models:ro
+    entrypoint: ["llama-server"]
+    command:
+      - "--model"
+      - "/models/${RERANKER_MODEL_FILE:-bge-reranker-v2-m3-Q8_0.gguf}"
+      - "--reranking"
+      - "--pooling"
+      - "rank"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8080"
+      - "--ctx-size"
+      - "2048"
+      # physical batch must be >= the largest (query+document) token count, else
+      # a long pair fails with "input too large to process (batch 512)".
+      - "--batch-size"
+      - "2048"
+      - "--ubatch-size"
+      - "2048"
+      - "--threads"
+      - "${RERANKER_THREADS:-4}"
+      - "--metrics"
+    networks: [opsnet]
+
+  redis:
+    image: redis:7-alpine
+    container_name: opsgpt-redis
+    restart: unless-stopped
+    logging: *default-logging
+    # cache/rate-limit store: no persistence, LRU eviction under memory pressure
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks: [opsnet]
+
+  postgres:
+    # pgvector image = Postgres 16 + the `vector` extension (data-compatible with
+    # the stock postgres:16 volume). Used as the RAG vector store.
+    image: pgvector/pgvector:pg16
+    container_name: opsgpt-postgres
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      POSTGRES_USER: "${POSTGRES_USER:-opsgpt}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-opsgpt}"
+      POSTGRES_DB: "${POSTGRES_DB:-opsgpt}"
+    volumes:
+      - ./postgres/data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-opsgpt} -d ${POSTGRES_DB:-opsgpt}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks: [opsnet]
+
+  # Phase 7: scheduled PostgreSQL backups with retention.
+  backup:
+    image: postgres:16-alpine
+    container_name: opsgpt-backup
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      PGPASSWORD: "${POSTGRES_PASSWORD:-opsgpt}"
+      POSTGRES_USER: "${POSTGRES_USER:-opsgpt}"
+      POSTGRES_DB: "${POSTGRES_DB:-opsgpt}"
+      BACKUP_INTERVAL_HOURS: "${BACKUP_INTERVAL_HOURS:-24}"
+      BACKUP_RETAIN_DAYS: "${BACKUP_RETAIN_DAYS:-7}"
+    volumes:
+      - ./backups:/backups
+      - ./scripts/pg_backup.sh:/pg_backup.sh:ro
+    entrypoint: ["/bin/sh", "/pg_backup.sh"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [opsnet]
+
+  backend:
+    build:
+      context: ./backend
+    image: opsgpt/backend:latest
+    container_name: opsgpt-backend
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      OPSGPT_ENVIRONMENT: "${OPSGPT_ENVIRONMENT:-production}"
+      OPSGPT_LOG_LEVEL: "${OPSGPT_LOG_LEVEL:-INFO}"
+      OPSGPT_LLAMACPP_BASE_URL: "http://llamacpp:8080"
+      OPSGPT_MODEL_PHI_BASE_URL: "http://phi:8080"
+      OPSGPT_MODEL_XCODER_BASE_URL: "http://xcoder:8080"
+      OPSGPT_CORS_ORIGINS: "${OPSGPT_CORS_ORIGINS:-http://localhost:${HTTP_PORT:-8088}}"
+      OPSGPT_DATABASE_URL: "postgresql+asyncpg://${POSTGRES_USER:-opsgpt}:${POSTGRES_PASSWORD:-opsgpt}@postgres:5432/${POSTGRES_DB:-opsgpt}"
+      OPSGPT_REDIS_URL: "redis://redis:6379/0"
+      OPSGPT_RATE_LIMIT_PER_MIN: "${OPSGPT_RATE_LIMIT_PER_MIN:-30}"
+      OPSGPT_JWT_SECRET: "${OPSGPT_JWT_SECRET:-CHANGE_ME_IN_PRODUCTION}"
+      OPSGPT_ACCESS_TOKEN_TTL_MIN: "${OPSGPT_ACCESS_TOKEN_TTL_MIN:-30}"
+      OPSGPT_REFRESH_TOKEN_TTL_DAYS: "${OPSGPT_REFRESH_TOKEN_TTL_DAYS:-7}"
+      OPSGPT_ADMIN_EMAIL: "${OPSGPT_ADMIN_EMAIL:-admin@opsgpt.local}"
+      OPSGPT_ADMIN_PASSWORD: "${OPSGPT_ADMIN_PASSWORD:-}"
+      OPSGPT_TOOLS_KUBERNETES_ENABLED: "${OPSGPT_TOOLS_KUBERNETES_ENABLED:-true}"
+      OPSGPT_TOOLS_KUBECONFIG: "/secrets/kube-readonly.yaml"
+      OPSGPT_EMBED_BASE_URL: "http://embed:8080"
+      OPSGPT_EMBED_BGE_BASE_URL: "http://embed-bge:8080"
+      OPSGPT_RERANKER_BASE_URL: "http://reranker:8080"
+      # Elasticsearch MCP provider (registered only when ES_URL is set)
+      OPSGPT_ES_URL: "${OPSGPT_ES_URL:-}"
+      OPSGPT_ES_USERNAME: "${OPSGPT_ES_USERNAME:-}"
+      OPSGPT_ES_PASSWORD: "${OPSGPT_ES_PASSWORD:-}"
+      OPSGPT_ES_API_KEY: "${OPSGPT_ES_API_KEY:-}"
+      OPSGPT_ES_VERIFY_TLS: "${OPSGPT_ES_VERIFY_TLS:-true}"
+    volumes:
+      # read-only kubeconfig for the Kubernetes tool provider
+      - ./secrets/kube-readonly.yaml:/secrets/kube-readonly.yaml:ro
+      # uploaded documents (originals)
+      - ./uploads:/uploads
+    depends_on:
+      llamacpp:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      embed:
+        condition: service_started
+      embed-bge:
+        condition: service_started
+      reranker:
+        condition: service_started
+      phi:
+        condition: service_started
+      xcoder:
+        condition: service_started
+    networks: [opsnet]
+
+  frontend:
+    build:
+      context: ./frontend
+    image: opsgpt/frontend:latest
+    container_name: opsgpt-frontend
+    restart: unless-stopped
+    logging: *default-logging
+    ports:
+      - "${HTTP_PORT:-8088}:80"
+    depends_on:
+      - backend
+    networks: [opsnet]
+
+  # --- Phase 6: monitoring stack ---
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: opsgpt-prometheus
+    restart: unless-stopped
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=15d"
+    networks: [opsnet]
+
+  grafana:
+    image: grafana/grafana:11.3.1
+    container_name: opsgpt-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: "${GRAFANA_USER:-admin}"
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_PASSWORD:-OpsGPT-Grafana-2026}"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "${GRAFANA_PORT:-3001}:3000"
+    depends_on: [prometheus]
+    networks: [opsnet]
+
+  node-exporter:
+    image: prom/node-exporter:v1.8.2
+    container_name: opsgpt-node-exporter
+    restart: unless-stopped
+    command:
+      - "--path.rootfs=/host"
+    pid: host
+    volumes:
+      - /:/host:ro,rslave
+    networks: [opsnet]
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    container_name: opsgpt-cadvisor
+    restart: unless-stopped
+    privileged: true
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    networks: [opsnet]
+
+networks:
+  opsnet:
+    driver: bridge
+
+volumes:
+  prometheus_data:
+  grafana_data:
